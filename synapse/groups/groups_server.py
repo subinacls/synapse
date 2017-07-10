@@ -72,6 +72,274 @@ class GroupsServerHandler(object):
         # Ensure attestations get renewed
         hs.get_groups_attestation_renewer()
 
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def get_group_summary(self, group_id, requester_user_id):
+        is_user_in_group = yield self.store.is_user_in_group(requester_user_id, group_id)
+
+        profile = yield self.get_group_profile(group_id, requester_user_id)
+
+        users, roles = yield self.store.get_users_for_summary_by_role(
+            group_id, include_private=is_user_in_group,
+        )
+
+        # TODO: Add profiles to users
+        # TODO: Add assestations to users
+
+        rooms, categories = yield self.store.get_rooms_for_summary_by_category(
+            group_id, include_private=is_user_in_group,
+        )
+
+        for room_entry in rooms:
+            room_id = room_entry["room_id"]
+            joined_users = yield self.store.get_users_in_room(room_id)
+            entry = yield self.room_list_handler.generate_room_entry(
+                room_id, len(joined_users),
+                with_alias=False, allow_private=True,
+            )
+            entry.pop("room_id", None)
+
+            room_entry["profile"] = entry
+
+        rooms.sort(key=lambda e: e.get("order", 0))
+
+        for entry in users:
+            user_id = entry["user_id"]
+
+            if not self.is_mine_id(requester_user_id):
+                attestation = yield self.store.get_remote_attestation(group_id, user_id)
+                if not attestation:
+                    continue
+
+                entry["attestation"] = attestation
+            else:
+                entry["attestation"] = self.attestations.create_attestation(
+                    group_id, user_id,
+                )
+
+        users.sort(key=lambda e: e.get("order", 0))
+
+        defer.returnValue({
+            "profile": profile,
+            "users_section": {
+                "users": users,
+                "roles": roles,
+                "total_user_count_estimate": 0,  # TODO
+            },
+            "rooms_section": {
+                "rooms": rooms,
+                "categories": categories,
+                "total_room_count_estimate": 0,  # TODO
+            },
+        })
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def update_group_summary_room(self, group_id, user_id, room_id, category_id, content):
+        is_admin = yield self.store.is_user_admin_in_group(group_id, user_id)
+        if not is_admin:
+            raise SynapseError(403, "User is not admin in group")
+
+        order = content.get("order", None)
+
+        visibility = content.get("visibility")
+        if visibility:
+            vis_type = visibility["type"]
+            if vis_type not in ("public", "private"):
+                raise SynapseError(
+                    400, "Synapse only supports 'public'/'private' visibility"
+                )
+            is_public = vis_type == "public"
+        else:
+            is_public = None
+
+        yield self.store.add_room_to_summary(
+            group_id=group_id,
+            room_id=room_id,
+            category_id=category_id,
+            order=order,
+            is_public=is_public,
+        )
+
+        defer.returnValue({})
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def delete_group_summary_room(self, group_id, user_id, room_id, category_id):
+        is_admin = yield self.store.is_user_admin_in_group(group_id, user_id)
+        if not is_admin:
+            raise SynapseError(403, "User is not admin in group")
+
+        yield self.store.remove_room_from_summary(
+            group_id=group_id,
+            room_id=room_id,
+            category_id=category_id,
+        )
+
+        defer.returnValue({})
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def get_group_categories(self, group_id, user_id):
+        categories = yield self.store.get_group_categories(
+            group_id=group_id,
+        )
+        defer.returnValue({"categories": categories})
+
+    @check_group_is_ours(and_exists=True)
+    def get_group_category(self, group_id, user_id, category_id):
+        return self.store.get_group_category(
+            group_id=group_id,
+            category_id=category_id,
+        )
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def update_group_category(self, group_id, user_id, category_id, content):
+        is_admin = yield self.store.is_user_admin_in_group(group_id, user_id)
+        if not is_admin:
+            raise SynapseError(403, "User is not admin in group")
+
+        visibility = content.get("visibility")
+        if visibility:
+            vis_type = visibility["type"]
+            if vis_type not in ("public", "private"):
+                raise SynapseError(
+                    400, "Synapse only supports 'public'/'private' visibility"
+                )
+            is_public = vis_type == "public"
+        else:
+            is_public = None
+
+        profile = content.get("profile")
+
+        yield self.store.upsert_group_category(
+            group_id=group_id,
+            category_id=category_id,
+            is_public=is_public,
+            profile=profile,
+        )
+
+        defer.returnValue({})
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def delete_group_category(self, group_id, user_id, category_id):
+        is_admin = yield self.store.is_user_admin_in_group(group_id, user_id)
+        if not is_admin:
+            raise SynapseError(403, "User is not admin in group")
+
+        yield self.store.remove_group_category(
+            group_id=group_id,
+            category_id=category_id,
+        )
+
+        defer.returnValue({})
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def get_group_roles(self, group_id, user_id):
+        roles = yield self.store.get_group_roles(
+            group_id=group_id,
+        )
+        defer.returnValue({"roles": roles})
+
+    @check_group_is_ours(and_exists=True)
+    def get_group_role(self, group_id, user_id, role_id):
+        return self.store.get_group_role(
+            group_id=group_id,
+            role_id=role_id,
+        )
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def update_group_role(self, group_id, user_id, role_id, content):
+        is_admin = yield self.store.is_user_admin_in_group(group_id, user_id)
+        if not is_admin:
+            raise SynapseError(403, "User is not admin in group")
+
+        visibility = content.get("visibility")
+        if visibility:
+            vis_type = visibility["type"]
+            if vis_type not in ("public", "private"):
+                raise SynapseError(
+                    400, "Synapse only supports 'public'/'private' visibility"
+                )
+            is_public = vis_type == "public"
+        else:
+            is_public = None
+
+        profile = content.get("profile")
+
+        yield self.store.upsert_group_role(
+            group_id=group_id,
+            role_id=role_id,
+            is_public=is_public,
+            profile=profile,
+        )
+
+        defer.returnValue({})
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def delete_group_role(self, group_id, user_id, role_id):
+        is_admin = yield self.store.is_user_admin_in_group(group_id, user_id)
+        if not is_admin:
+            raise SynapseError(403, "User is not admin in group")
+
+        yield self.store.remove_group_role(
+            group_id=group_id,
+            role_id=role_id,
+        )
+
+        defer.returnValue({})
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def update_group_summary_user(self, group_id, requester_user_id, user_id, role_id,
+                                  content):
+        is_admin = yield self.store.is_user_admin_in_group(group_id, requester_user_id)
+        if not is_admin:
+            raise SynapseError(403, "User is not admin in group")
+
+        order = content.get("order", None)
+
+        visibility = content.get("visibility")
+        if visibility:
+            vis_type = visibility["type"]
+            if vis_type not in ("public", "private"):
+                raise SynapseError(
+                    400, "Synapse only supports 'public'/'private' visibility"
+                )
+            is_public = vis_type == "public"
+        else:
+            is_public = None
+
+        yield self.store.add_user_to_summary(
+            group_id=group_id,
+            user_id=user_id,
+            role_id=role_id,
+            order=order,
+            is_public=is_public,
+        )
+
+        defer.returnValue({})
+
+    @check_group_is_ours(and_exists=True)
+    @defer.inlineCallbacks
+    def delete_group_summary_user(self, group_id, requester_user_id, user_id, role_id):
+        is_admin = yield self.store.is_user_admin_in_group(group_id, requester_user_id)
+        if not is_admin:
+            raise SynapseError(403, "User is not admin in group")
+
+        yield self.store.remove_user_from_summary(
+            group_id=group_id,
+            user_id=user_id,
+            role_id=role_id,
+        )
+
+        defer.returnValue({})
+
     @check_group_is_ours()
     @defer.inlineCallbacks
     def get_group_profile(self, group_id, requester_user_id):
@@ -204,7 +472,9 @@ class GroupsServerHandler(object):
         }
 
         if self.hs.is_mine_id(user_id):
-            raise NotImplementedError()
+            groups_local = self.hs.get_groups_local_handler()
+            res = yield groups_local.on_invite(group_id, user_id, content)
+            local_attestation = None
         else:
             local_attestation = self.attestations.create_attestation(group_id, user_id)
             content.update({
@@ -320,7 +590,8 @@ class GroupsServerHandler(object):
 
         if is_kick:
             if self.hs.is_mine_id(user_id):
-                raise NotImplementedError()
+                groups_local = self.hs.get_groups_local_handler()
+                yield groups_local.user_removed_from_group(group_id, user_id, {})
             else:
                 yield self.transport_client.remove_user_from_group_notification(
                     get_domain_from_id(user_id), group_id, user_id, {}
